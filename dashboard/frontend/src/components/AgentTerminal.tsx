@@ -200,6 +200,116 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
     }
   }, [])
 
+  // Touch-to-scroll.
+  //
+  // @xterm/xterm v6's bundled scrollable widget (a Monaco/VS Code-derived
+  // custom scrollbar, not native CSS overflow) only wires mouse wheel and
+  // dragging its own ~10px scrollbar thumb — there is no touch-pan support
+  // anywhere in the dependency (confirmed by direct inspection of the
+  // bundle; see workspace/development/debug/[C]bug-mobile-terminal-scroll-
+  // 2026-09-19.md). This wires a vertical swipe on the mount container to
+  // a synthetic 'wheel' event dispatched on xterm's own screen element.
+  //
+  // IMPORTANT: this must NOT call term.scrollLines() directly (an earlier
+  // version of this fix did, and it visibly did nothing on a real device).
+  // term.scrollLines() only moves xterm's scrollback offset, which is a
+  // no-op whenever the terminal has no scrollback — and it has none
+  // whenever the Claude Code CLI's own interactive UI is on screen, because
+  // that UI runs inside the terminal's alternate screen buffer (confirmed
+  // via a captured real session: `\x1b[?1049h` in the raw pty bytes, and
+  // `term.buffer.active.type === 'alternate'` with 0 scrollback), which by
+  // terminal convention never has scrollback (same as vim/htop in any
+  // desktop terminal). A real mouse/trackpad wheel already works there —
+  // not via scrollback, but because the CLI also enables real mouse
+  // tracking (`\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h`, confirmed in
+  // the same capture) specifically so it can scroll its own view, and
+  // xterm.js's *native* wheel handler forwards wheel input to the pty as an
+  // SGR mouse report in that case (confirmed empirically: a real wheel
+  // event over a no-scrollback buffer produced `\x1b[<64;...M` on
+  // `term.onData`). Dispatching a synthetic 'wheel' event reuses that
+  // already-correct pipeline — scrollLines when there's real scrollback,
+  // mouse-report forwarding to the CLI when there isn't — instead of
+  // reimplementing only the half of it that doesn't apply to the CLI's
+  // normal (alt-screen) state. See workspace/development/debug/
+  // [C]bug-mobile-terminal-scroll-2026-09-19.md for the full investigation.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+
+    // Undecided until enough movement has happened to tell a vertical swipe
+    // apart from a horizontal one or a tap; null keeps both taps (focus) and
+    // horizontal gestures (e.g. any future text-selection support) untouched
+    // until we're sure this is a scroll.
+    let isVerticalScroll: boolean | null = null
+    let startX = 0
+    let startY = 0
+    let lastY = 0
+
+    // Minimum total displacement before committing to a gesture direction —
+    // filters out finger jitter on tap.
+    const DIRECTION_THRESHOLD_PX = 10
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return // ignore multi-touch (pinch, etc.)
+      startX = e.touches[0].clientX
+      startY = e.touches[0].clientY
+      lastY = startY
+      isVerticalScroll = null
+    }
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (e.touches.length !== 1) return
+      const x = e.touches[0].clientX
+      const y = e.touches[0].clientY
+
+      if (isVerticalScroll === null) {
+        const dx = Math.abs(x - startX)
+        const dy = Math.abs(y - startY)
+        if (dx < DIRECTION_THRESHOLD_PX && dy < DIRECTION_THRESHOLD_PX) return
+        isVerticalScroll = dy > dx
+      }
+      if (!isVerticalScroll) return // horizontal drag — leave default behavior alone
+
+      // Only now that this is confirmed to be a vertical scroll do we stop
+      // the gesture from doing anything else (e.g. pull-to-refresh).
+      e.preventDefault()
+
+      const deltaY = lastY - y // finger moving up => scroll forward (down)
+      lastY = y
+
+      // Must target xterm's own screen element (the innermost element a
+      // real pointer would be over), not the outer mount container — a
+      // dispatched event only bubbles *up* through ancestors, and the
+      // container is an ancestor of xterm's internal DOM, not a descendant.
+      const screenEl = el.querySelector<HTMLElement>('.xterm-screen')
+      if (!screenEl) return
+      screenEl.dispatchEvent(new WheelEvent('wheel', {
+        deltaY,
+        deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+        bubbles: true,
+        cancelable: true,
+        clientX: x,
+        clientY: y,
+      }))
+    }
+
+    const onTouchEnd = () => {
+      isVerticalScroll = null
+    }
+
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: false })
+    el.addEventListener('touchend', onTouchEnd, { passive: true })
+    el.addEventListener('touchcancel', onTouchEnd, { passive: true })
+
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+    }
+  }, [])
+
   // Connect / start session for this agent
   useEffect(() => {
     let cancelled = false

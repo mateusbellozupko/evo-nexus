@@ -82,6 +82,15 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
   const pingRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [status, setStatus] = useState<Status>('connecting')
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+  const [reconnectKey, setReconnectKey] = useState(0)
+  // Set by the visibilitychange handler right before it forces a silent
+  // background reconnect (mobile OSes kill the socket while backgrounded).
+  // Distinguishes that case from a real user-initiated open/switch, so the
+  // session_joined handler below knows not to yank the view back to the
+  // bottom out from under someone who scrolled up to read history —
+  // otherwise every backgrounding (screen lock, app switch, flaky mobile
+  // network) snaps back to the tail, which reads as "can't scroll up".
+  const isSilentReconnectRef = useRef(false)
 
   // Mount xterm once
   useEffect(() => {
@@ -151,6 +160,18 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
     }
     window.addEventListener('resize', onResize)
 
+    // window 'resize' alone misses cases where the *container* changes size
+    // without the window doing so — e.g. a mobile browser's address bar
+    // collapsing/expanding (fires a visualViewport resize, not always a
+    // window one), or this pane's flex box changing when a sidebar/drawer
+    // toggles. When fit() lags behind the container's real width, xterm's
+    // internal .xterm-viewport ends up wider than its box and becomes its
+    // own horizontally scrollable region (the CSS-level fix in index.css
+    // covers that as a backstop) — but re-fitting on every real container
+    // resize is the actual root-cause fix: cols always match what's visible.
+    const resizeObserver = new ResizeObserver(onResize)
+    if (containerRef.current) resizeObserver.observe(containerRef.current)
+
     // Second line of defense: even though the parser-level handlers
     // above should prevent every known query reply, drop any onData
     // payload that still looks like a terminal auto-reply. Real user
@@ -172,6 +193,7 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
 
     return () => {
       window.removeEventListener('resize', onResize)
+      resizeObserver.disconnect()
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -241,6 +263,27 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
             // Replay any buffered output
             if (Array.isArray(msg.outputBuffer)) {
               msg.outputBuffer.forEach((chunk: string) => term!.write(chunk))
+            }
+            // Land on the latest output when opening/reopening a session,
+            // matching normal terminal/chat UX. term.write() above normally
+            // keeps the viewport pinned to the tail on its own, but that
+            // auto-follow silently turns itself off the moment xterm thinks
+            // the user has scrolled away from the bottom — which a stray
+            // touch during a long buffer replay (thousands of lines, up to
+            // the 5000-line scrollback) can trigger on mobile before the
+            // replay even finishes. Forcing it here guarantees the session
+            // always opens showing the latest content rather than wherever
+            // that race left it.
+            //
+            // Skip it on a silent background reconnect though — that path
+            // re-joins behind the user's back (mobile backgrounding kills
+            // the socket; visibilitychange reconnects it), and forcing the
+            // scroll there overrides wherever they'd deliberately scrolled
+            // to, making the terminal feel like it can't be scrolled up.
+            if (isSilentReconnectRef.current) {
+              isSilentReconnectRef.current = false
+            } else {
+              term!.scrollToBottom()
             }
             // If an agent is already running in this session, just attach
             if (msg.active || alreadyActive) {
@@ -337,7 +380,22 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
         wsRef.current = null
       }
     }
-  }, [agent, externalSessionId, workingDir])
+  }, [agent, externalSessionId, workingDir, reconnectKey])
+
+  // Reconnect when the tab becomes visible again if the socket died while
+  // backgrounded (mobile OSes aggressively close background tabs' network
+  // connections — without this, coming back to the tab leaves the terminal
+  // dead with no way to interact until a manual reload).
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState !== 'visible') return
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return
+      isSilentReconnectRef.current = true
+      setReconnectKey(k => k + 1)
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [])
 
   const statusDotColor =
     status === 'running'

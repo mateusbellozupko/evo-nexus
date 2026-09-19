@@ -69,7 +69,10 @@ class HeartbeatConfig(BaseModel):
         return list(dict.fromkeys(v))  # deduplicate preserving order
 
     @model_validator(mode="after")
-    def interval_trigger_requires_interval_field(self) -> "HeartbeatConfig":
+    def auto_add_interval_trigger(self) -> "HeartbeatConfig":
+        """Silently add 'interval' to wake_triggers when interval_seconds > 0 and it is absent."""
+        if self.interval_seconds > 0 and "interval" not in self.wake_triggers:
+            self.wake_triggers = list(self.wake_triggers) + ["interval"]
         return self
 
 

@@ -265,10 +265,17 @@ docker-build:       ## 🐳 Build the image
 
 heartbeat-lint:     ## 🔍 Validate config/heartbeats.yaml against pydantic schema
 	@cd dashboard/backend && $(PYTHON) -c "\
-import sys; sys.path.insert(0, '.'); \
+import sys, yaml; sys.path.insert(0, '.'); \
 from heartbeat_schema import load_heartbeats_yaml; \
 from pathlib import Path; \
 path = Path('../../config/heartbeats.yaml'); \
+raw = yaml.safe_load(open(path, encoding='utf-8')) or {}; \
+errors = []; \
+[errors.append(f'  ERROR: {h.get(\"id\", \"?\")} has interval_seconds={h.get(\"interval_seconds\")} but wake_triggers does not include \"interval\" — add it or it will never be scheduled') \
+ for h in (raw.get('heartbeats') or []) \
+ if (h.get('interval_seconds') or 0) > 0 and 'interval' not in (h.get('wake_triggers') or [])]; \
+[print(e) for e in errors]; \
+sys.exit(1) if errors else None; \
 cfg = load_heartbeats_yaml(path); \
 print(f'OK — {len(cfg.heartbeats)} heartbeat(s) validated'); \
 [print(f'  {h.id}: agent={h.agent} interval={h.interval_seconds}s enabled={h.enabled}') for h in cfg.heartbeats]"

@@ -86,13 +86,21 @@ def release_expired_locks(app=None) -> int:
         for row in orphaned_rows:
             ticket_id = row[0]
 
-            db.session.execute(
+            result = db.session.execute(
                 db.text(
                     "UPDATE tickets SET status = 'open', updated_at = :now "
                     "WHERE id = :id AND locked_at IS NULL AND status = 'in_progress'"
                 ),
                 {"id": ticket_id, "now": now_reset},
             )
+
+            # A concurrent request may have locked or changed the ticket's
+            # status between the SELECT above and this UPDATE — in that case
+            # the UPDATE affects zero rows, and recording a reset activity
+            # here would be a false entry for a ticket the janitor never
+            # actually touched.
+            if result.rowcount != 1:
+                continue
 
             activity = TicketActivity(
                 id=str(uuid.uuid4()),

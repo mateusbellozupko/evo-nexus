@@ -90,6 +90,48 @@ class HeartbeatsFile(BaseModel):
         return self
 
 
+def lint_raw_heartbeats(raw: object) -> List[str]:
+    """Scan the raw (pre-Pydantic) heartbeats mapping for interval/wake_triggers
+    mismatches, tolerating malformed YAML shapes rather than crashing on them.
+
+    A heartbeat with interval_seconds > 0 but no "interval" in wake_triggers
+    will silently never be scheduled — this is normally caught by
+    auto_add_interval_trigger's model validator, but this runs BEFORE that
+    validator (at Makefile lint time, on raw YAML) so it needs its own
+    defensive type checks: a malformed entry here should produce a lint
+    error, not an uncaught exception that hides the real problem.
+
+    Returns a list of human-readable error strings (empty if none).
+    """
+    errors: List[str] = []
+    heartbeats = raw.get("heartbeats") if isinstance(raw, dict) else None
+    for h in heartbeats or []:
+        if not isinstance(h, dict):
+            continue
+
+        interval_seconds = h.get("interval_seconds")
+        is_positive_number = (
+            isinstance(interval_seconds, (int, float))
+            and not isinstance(interval_seconds, bool)
+            and interval_seconds > 0
+        )
+        if not is_positive_number:
+            continue
+
+        wake_triggers = h.get("wake_triggers")
+        if not isinstance(wake_triggers, list):
+            wake_triggers = []
+
+        if "interval" not in wake_triggers:
+            heartbeat_id = h.get("id", "?")
+            errors.append(
+                f'  ERROR: {heartbeat_id} has interval_seconds={interval_seconds} '
+                f'but wake_triggers does not include "interval" — add it or it will never be scheduled'
+            )
+
+    return errors
+
+
 def load_heartbeats_yaml(
     path: Path | None = None,
     include_plugins: bool = True,

@@ -551,8 +551,14 @@ export default function AgentTerminal({ agent, sessionId: externalSessionId, wor
         )}
       </div>
 
-      {/* xterm */}
-      <div ref={containerRef} className="flex-1 min-h-0 px-4 py-3 bg-[#0C111D]" />
+      {/* xterm — padding lives on the outer div so FitAddon measures the
+          inner div's exact content area (clientHeight excludes padding only
+          when the element itself has no padding). Putting py/px on the same
+          div FitAddon uses as parentElement causes it to over-count rows/cols
+          by the padding amount, clipping the last 1-2 lines. */}
+      <div className="flex-1 min-h-0 px-4 py-3 bg-[#0C111D]">
+        <div ref={containerRef} className="h-full w-full" />
+      </div>
     </div>
   )
 }
